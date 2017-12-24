@@ -6,7 +6,7 @@ vector<vector<int>> labels;
 
 vector<vector<double>> centers;
 /* The number of occurences of each center. */
-vector<int> center_counts;
+vector<double> center_counts;
 
 CvPoint move_cluster_center(cv::Mat image, CvPoint center) {
 	double min_grad = FLT_MAX;
@@ -75,5 +75,232 @@ void draw_centers(cv::Mat image) {
 	for (int k = 0; k < centers.size(); k++) {
 		circle(image, cv::Point(centers[k][3], centers[k][4]), 11, cv::Scalar(0,0,0), CV_FILLED, 8, 0);
 		circle(image, cv::Point(centers[k][3], centers[k][4]), 10, cv::Scalar(centers[k][0], centers[k][1], centers[k][2]), CV_FILLED, 8, 0);
+	}
+}
+
+double compute_dist(int ci, CvPoint pixel, cv::Vec3b colour, int step, int nc) {
+	double dc = sqrt(pow(centers[ci][0] - colour.val[0], 2) + pow(centers[ci][1]
+		- colour.val[1], 2) + pow(centers[ci][2] - colour.val[2], 2));
+	double ds = sqrt(pow(centers[ci][3] - pixel.x, 2) + pow(centers[ci][4] - pixel.y, 2));
+
+	return sqrt(pow(dc / nc, 2) + pow(ds / step, 2));
+
+	//double w = 1.0 / (pow(ns / nc, 2));
+	//return sqrt(dc) + sqrt(ds * w);
+}
+
+void generate_superpixels(cv::Mat image, int step, int nc) {
+	/* Run EM for 10 iterations (as prescribed by the algorithm). */
+	for (int i = 0; i < 10; i++) {
+		/* Reset distance values. */
+		for (int j = 0; j < image.size().width; j++) {
+			for (int k = 0; k < image.size().height; k++) {
+				distances[j][k] = FLT_MAX;
+			}
+		}
+
+		for (int j = 0; j < (int)centers.size(); j++) {
+			/* Only compare to pixels in a 2 x step by 2 x step region. */
+			for (int k = centers[j][3] - step; k < centers[j][3] + step; k++) {
+				for (int l = centers[j][4] - step; l < centers[j][4] + step; l++) {
+
+					if (k >= 0 && k < image.size().width && l >= 0 && l < image.size().height) {
+						cv::Vec3b colour = image.at<cv::Vec3b>(cv::Point(k, l));
+						double d = compute_dist(j, cvPoint(k, l), colour, step, nc);
+
+						/* Update cluster allocation if the cluster minimizes the
+						distance. */
+						if (d < distances[k][l]) {
+							distances[k][l] = d;
+							labels[k][l] = j;
+						}
+					}
+				}
+			}
+		}
+
+		/* Clear the center values. */
+		for (int j = 0; j < (int)centers.size(); j++) {
+			centers[j][0] = centers[j][1] = centers[j][2] = centers[j][3] = centers[j][4] = 0;
+			center_counts[j] = 0;
+		}
+
+		/* Compute the new cluster centers. */
+		for (int j = 0; j < image.size().width; j++) {
+			for (int k = 0; k < image.size().height; k++) {
+				int c_id = labels[j][k];
+
+				if (c_id != -1) {
+					cv::Vec3b colour = image.at<cv::Vec3b>(cv::Point(j, k));
+
+					centers[c_id][0] += colour.val[0];
+					centers[c_id][1] += colour.val[1];
+					centers[c_id][2] += colour.val[2];
+					centers[c_id][3] += j;
+					centers[c_id][4] += k;
+
+					center_counts[c_id] += 1;
+				}
+			}
+		}
+
+		/* Normalize the clusters. */
+		for (int j = 0; j < (int)centers.size(); j++) {
+			centers[j][0] /= center_counts[j];
+			centers[j][1] /= center_counts[j];
+			centers[j][2] /= center_counts[j];
+			centers[j][3] /= center_counts[j];
+			centers[j][4] /= center_counts[j];
+		}
+	}
+}
+
+void create_connectivity(cv::Mat image) {
+	int label = 0, adjlabel = 0;
+	const int lims = (image.size().width * image.size().height) / ((int)centers.size());
+
+	const int dx4[4] = { -1,  0,  1,  0 };
+	const int dy4[4] = { 0, -1,  0,  1 };
+
+	/* Initialize the new cluster matrix. */
+	vector<vector<double>> new_clusters;
+	for (int i = 0; i < image.size().width; i++) {
+		vector<double> nc;
+		for (int j = 0; j < image.size().height; j++) {
+			nc.push_back(-1);
+		}
+		new_clusters.push_back(nc);
+	}
+
+	for (int i = 0; i < image.size().width; i++) {
+		for (int j = 0; j < image.size().height; j++) {
+			if (new_clusters[i][j] == -1) {
+				vector<CvPoint> elements;
+				elements.push_back(cvPoint(i, j));
+
+				/* Find an adjacent label, for possible use later. */
+				for (int k = 0; k < 4; k++) {
+					int x = elements[0].x + dx4[k], y = elements[0].y + dy4[k];
+
+					if (x >= 0 && x < image.size().width && y >= 0 && y < image.size().height) {
+						if (new_clusters[x][y] >= 0) {
+							adjlabel = new_clusters[x][y];
+						}
+					}
+				}
+
+				int count = 1;
+				for (int c = 0; c < count; c++) {
+					for (int k = 0; k < 4; k++) {
+						int x = elements[c].x + dx4[k], y = elements[c].y + dy4[k];
+
+						if (x >= 0 && x < image.size().width && y >= 0 && y < image.size().height) {
+							if (new_clusters[x][y] == -1 && labels[i][j] == labels[x][y]) {
+								elements.push_back(cvPoint(x, y));
+								new_clusters[x][y] = label;
+								count += 1;
+							}
+						}
+					}
+				}
+
+				/* Use the earlier found adjacent label if a segment size is
+				smaller than a limit. */
+				if (count <= lims >> 2) {
+					for (int c = 0; c < count; c++) {
+						new_clusters[elements[c].x][elements[c].y] = adjlabel;
+					}
+					label -= 1;
+				}
+				label += 1;
+			}
+		}
+	}
+}
+
+void display_contours(cv::Mat image, cv::Vec3b colour) {
+	const int dx8[8] = { -1, -1,  0,  1, 1, 1, 0, -1 };
+	const int dy8[8] = { 0, -1, -1, -1, 0, 1, 1,  1 };
+
+	/* Initialize the contour vector and the matrix detailing whether a pixel
+	* is already taken to be a contour. */
+	vector<CvPoint> contours;
+	vector<vector<bool>> istaken;
+	for (int i = 0; i < image.size().width; i++) {
+		vector<bool> nb;
+		for (int j = 0; j < image.size().height; j++) {
+			nb.push_back(false);
+		}
+		istaken.push_back(nb);
+	}
+
+	/* Go through all the pixels. */
+	for (int i = 0; i < image.size().width; i++) {
+		for (int j = 0; j < image.size().height; j++) {
+			int nr_p = 0;
+
+			/* Compare the pixel to its 8 neighbours. */
+			for (int k = 0; k < 8; k++) {
+				int x = i + dx8[k], y = j + dy8[k];
+
+				if (x >= 0 && x < image.size().width && y >= 0 && y < image.size().height) {
+					if (istaken[x][y] == false && labels[i][j] != labels[x][y]) {
+						nr_p += 1;
+					}
+				}
+			}
+
+			/* Add the pixel to the contour list if desired. */
+			if (nr_p >= 2) {
+				contours.push_back(cvPoint(i, j));
+				istaken[i][j] = true;
+			}
+		}
+	}
+
+	/* Draw the contour pixels. */
+	for (int i = 0; i < (int)contours.size(); i++) {
+		image.at<cv::Vec3b>(cv::Point(contours[i].x, contours[i].y)) = colour;
+	}
+	for (int i = 0; i < image.size().width; i++) {
+		for (int j = 0; j < image.size().height; j++) {
+			if (labels[i][j] == -1) {
+				std::cout << "Ups" << std::endl;
+				image.at<cv::Vec3b>(cv::Point(i,j)) = cv::Vec3b(0, 0, 0);
+			}
+		}
+	}
+}
+
+void colour_with_cluster_means(cv::Mat image) {
+	vector<double> colours0(centers.size());
+	vector<double> colours1(centers.size());
+	vector<double> colours2(centers.size());
+	vector<double> counter(centers.size());
+	/* Gather the colour values per cluster. */
+	for (int i = 0; i < image.size().width; i++) {
+		for (int j = 0; j < image.size().height; j++) {
+			int index = labels[i][j];
+			cv::Vec3b colour = image.at<cv::Vec3b>(cv::Point(i, j));
+			colours0[index] += colour.val[0];
+			colours1[index] += colour.val[1];
+			colours2[index] += colour.val[2];
+			counter[index] += colour.val[0];
+		}
+	}
+
+	/* Divide by the number of pixels per cluster to get the mean colour. */
+	for (int i = 0; i < centers.size(); i++) {
+		colours0[i] /= center_counts[i];
+		colours1[i] /= center_counts[i];
+		colours2[i] /= center_counts[i];
+	}
+
+	/* Fill in. */
+	for (int i = 0; i < image.size().width; i++) {
+		for (int j = 0; j < image.size().height; j++) {
+			//std::cout << ncolour << std::endl;
+			image.at<cv::Vec3b>(cv::Point(i, j)) = cv::Vec3b(colours0[labels[i][j]], colours1[labels[i][j]], colours2[labels[i][j]]);
+		}
 	}
 }

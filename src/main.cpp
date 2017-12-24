@@ -32,11 +32,18 @@ int main(int argc, char** argv )
 	cvtColor(image, lab_image, CV_BGR2Lab);
 	int num_superpixels = atoi(argv[2]);
 	double step = sqrt((image.cols*image.rows) / (double)num_superpixels); // Grid interval
-	int nc = 20;
+	int nc = 50;
 	
 	initialize_cluster_centers(lab_image, step, nc);
-	draw_centers(lab_image);
-	imshow("ak", lab_image);
+	Mat init_circles = lab_image.clone();
+	draw_centers(init_circles);
+	cvtColor(init_circles, init_circles, CV_Lab2BGR);
+	imshow("ak1", init_circles);
+	generate_superpixels(lab_image, step, nc);
+	create_connectivity(lab_image);
+	colour_with_cluster_means(image);
+	display_contours(image, Vec3b(0, 0, 255));
+	imshow("ak", image);
     waitKey(0);
 	
     return 0;
